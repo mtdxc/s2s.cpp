@@ -6,3 +6,6 @@
 	path = qwentts.cpp
 	url = https://github.com/ServeurpersoCom/qwentts.cpp.git
 	branch = master
+[submodule "qwenasr.cpp"]
+	path = qwenasr.cpp
+	url = https://github.com/ServeurpersoCom/qwenasr.cpp.git

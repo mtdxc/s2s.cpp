@@ -92,6 +92,18 @@ if(TARGET ggml-base)
 endif()
 add_dependencies(qwen-core qwentts-version)
 
+# qwenasr.cpp as a submodule: compile its in-process recognizer against the
+# same ggml tree and backends as the voice loop.
+set(QWENASR_VERSION_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/qwenasr/version.h")
+add_custom_target(qwenasr-version ALL
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/qwenasr"
+    COMMAND "${CMAKE_COMMAND}" "-DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}/qwenasr.cpp"
+            "-DOUTPUT=${QWENASR_VERSION_OUTPUT}" "-DMACRO=QWENASR_VERSION"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/version.cmake"
+    BYPRODUCTS "${QWENASR_VERSION_OUTPUT}"
+    COMMENT "Checking qwenasr version"
+)
+
 # cpp-httplib: the HTTP and WebSocket server, and the HTTP client of the
 # endpoint and the MCP servers.
 add_subdirectory(vendor/cpp-httplib)
@@ -145,6 +157,16 @@ macro(link_ggml_backends target)
     add_dependencies(${target} version)
 endmacro()
 
+# qwenasr-core: the Qwen3-ASR recognizer used by the speech-to-speech loop.
+add_library(qwenasr-core STATIC
+    qwenasr.cpp/src/qwenasr.cpp
+    qwenasr.cpp/src/pipeline-asr.cpp
+)
+target_compile_definitions(qwenasr-core PUBLIC QWENASR_STATIC)
+target_include_directories(qwenasr-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/qwenasr.cpp/src)
+target_include_directories(qwenasr-core PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/qwenasr)
+link_ggml_backends(qwenasr-core)
+add_dependencies(qwenasr-core qwenasr-version)
 
 # parakeet-core: the recognizer compiled once for every target that
 # transcribes. PARAKEET_STATIC keeps the C ABI free of dllimport on Windows,
@@ -198,7 +220,7 @@ add_library(s2s-core STATIC
     src/localvqe.cpp
     src/jarvis-fx.cpp)
 link_ggml_backends(s2s-core)
-target_link_libraries(s2s-core PUBLIC parakeet-core qwen-core httplib yyjson)
+target_link_libraries(s2s-core PUBLIC qwenasr-core qwen-core httplib yyjson)
 
 # s2s-server: the product, WebSocket voice loop plus the embedded webui
 add_executable(s2s-server tools/s2s-server.cpp ${WEBUI_OUTPUT} ${WEBUI_LIB_OUTPUT})

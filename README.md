@@ -54,7 +54,7 @@ big one for the model.
 3. LocalVQE v1.3: echo, noise and reverberation removed
 4. Silero VAD: speech detected window by window
 5. Smart Turn v3.2: end of turn decided
-6. Parakeet Ultra, or Parakeet TDT 0.6B v3 when Ultra is absent: turn transcribed, 25 European languages
+6. Qwen3-ASR 1.7B (or 0.6B): turn transcribed, with language auto-detection
 7. OpenAI chat completions endpoint (external): answer streamed
 8. Sentence split and text clean: synthesis units
 9. Qwen3-TTS 1.7B Base through qwentts.cpp: answer spoken, unit by unit
@@ -69,7 +69,7 @@ turn state machine, the echo cancellation and the protocol.
 ```
 git clone https://github.com/ServeurpersoCom/s2s.cpp.git
 cd s2s.cpp
-git submodule update --init      # ggml and qwentts.cpp, not the ggml inside qwentts.cpp
+git submodule update --init      # ggml, qwentts.cpp and qwenasr.cpp
 ./buildcuda.sh                   # NVIDIA GPU
 ./buildvulkan.sh                 # AMD/Intel GPU (Vulkan)
 ./buildsycl.sh                   # Intel GPU (SYCL)
@@ -95,6 +95,7 @@ machine has several.
 ./quantize.sh                    # Q4_K_M to Q8_0 derived from the F32 base
 ```
 
+`--asr 0.6B` selects the smaller Qwen3-ASR model; the default is 1.7B.
 `--quant` and `--tts` pick the ASR and TTS quants.
 
 ## Voices

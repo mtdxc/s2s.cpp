@@ -3,9 +3,8 @@
 #
 # Usage: ./models.sh [options]
 #   default:   Q8_0 everywhere
-#   --asr X:   ASR model, ultra (Parakeet Ultra) or v3 (Parakeet TDT 0.6B v3).
-#              The server takes Parakeet Ultra when present, v3 otherwise.
-#   --quant X: ASR quant (Q4_K_M, Q5_K_M, Q6_K, Q8_0, F32)
+#   --asr X:   Qwen3-ASR size, 0.6B or 1.7B (default).
+#   --quant X: ASR quant (Q4_K_M, Q8_0, BF16)
 #   --tts X:   TTS quant (Q4_K_M, Q8_0, BF16). Q4_K_M breaks the talker end of
 #              speech, so the default stays Q8_0.
 #
@@ -21,7 +20,8 @@ VAD_REPO="Serveurperso/Silero-VAD-GGUF"
 TURN_REPO="Serveurperso/Smart-Turn-v3-GGUF"
 TTS_REPO="Serveurperso/Qwen3-TTS-GGUF"
 AEC_REPO="Serveurperso/LocalVQE-GGUF"
-ASR="ultra"
+ASR_REPO="Serveurperso/Qwen3-ASR-GGUF"
+ASR="1.7B"
 QUANT="Q8_0"
 TTS_QUANT="Q8_0"
 
@@ -36,8 +36,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$ASR" in
-    ultra) ASR_REPO="Serveurperso/Parakeet-Ultra-GGUF";      ASR_FILE="parakeet-ultra" ;;
-    v3)    ASR_REPO="Serveurperso/Parakeet-TDT-0.6b-v3-GGUF"; ASR_FILE="parakeet-tdt-0.6b-v3" ;;
+    0.6B|1.7B) ASR_FILE="qwenasr-${ASR}" ;;
     *)     echo "Unknown ASR: $ASR"; exit 1 ;;
 esac
 

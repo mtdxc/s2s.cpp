@@ -12,7 +12,6 @@
 #include "llm-client.h"
 #include "localvqe.h"
 #include "log-capture.h"
-#include "parakeet.h"
 #include "realtime-proto.h"
 #include "s2s-conversation.h"
 #include "s2s-error.h"

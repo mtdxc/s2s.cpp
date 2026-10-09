@@ -13,10 +13,7 @@ bool models_load(const std::string & models_dir,
                  ConversationSetup & setup) {
     files.vad  = find_model(models_dir, "silero-vad", "");
     files.turn = find_model(models_dir, "smart-turn", "");
-    files.asr  = find_model(models_dir, "parakeet-ultra", "");
-    if (files.asr.empty()) {
-        files.asr = find_model(models_dir, "parakeet-tdt", "");
-    }
+    files.asr  = find_model(models_dir, "qwenasr-", "");
     files.talker = find_model(models_dir, "qwen-talker", "-base-");
     files.codec  = find_model(models_dir, "qwen-tokenizer", "");
     files.aec    = find_model(models_dir, "localvqe", "");
@@ -48,13 +45,13 @@ bool models_load(const std::string & models_dir,
         return false;
     }
 
-    pk_init_params asr_init = pk_init_default_params();
+    qa_init_params asr_init = qa_init_default_params();
     asr_init.model_path     = files.asr.c_str();
     asr_init.device         = device.empty() ? nullptr : device.c_str();
 
-    models.asr = pk_init(&asr_init);
+    models.asr = qa_init(&asr_init);
     if (!models.asr) {
-        s2s_log(S2S_LOG_ERROR, "[Load] FATAL: %s", pk_last_error());
+        s2s_log(S2S_LOG_ERROR, "[Load] FATAL: %s", qa_last_error());
         return false;
     }
 
@@ -85,8 +82,12 @@ bool models_load(const std::string & models_dir,
 void models_free(ServerModels & models) {
     lv_free(models.aec);
     tts_bridge_free(models.tts);
-    pk_free(models.asr);
+    qa_free(models.asr);
     st_free(models.turn);
     sv_free(models.vad);
-    models = ServerModels();
+    models.aec  = nullptr;
+    models.tts  = nullptr;
+    models.asr  = nullptr;
+    models.turn = nullptr;
+    models.vad  = nullptr;
 }
