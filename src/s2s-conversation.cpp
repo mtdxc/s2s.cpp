@@ -713,18 +713,21 @@ static void conn_recognize(Connection * conn, const TurnAudio & turn) {
 
     Timer t_asr;
 
-    pk_transcribe_params asr_params = pk_transcribe_default_params();
+    qa_transcribe_params asr_params = qa_transcribe_default_params();
     char *               text       = nullptr;
-    const pk_status      status =
-        pk_transcribe(conn->setup->models.asr, pcm.data(), pcm.size(), S2S_MODEL_RATE, &asr_params, &text);
-    if (status != PK_STATUS_OK) {
-        conn_error(conn, pk_last_error());
+    qa_status            status;
+    {
+        std::lock_guard<std::mutex> asr_lock(conn->setup->models.asr_mutex);
+        status = qa_transcribe(conn->setup->models.asr, pcm.data(), pcm.size(), S2S_MODEL_RATE, &asr_params, &text);
+    }
+    if (status != QA_STATUS_OK) {
+        conn_error(conn, qa_last_error());
         conn_release(conn, turn.turn_id, turn.revision);
         return;
     }
 
     const std::string transcript = text;
-    pk_free_text(text);
+    qa_free_text(text);
 
     s2s_log(S2S_LOG_INFO, "[Perf] Recognize %.1f ms (%.2fs of audio)", t_asr.ms(),
             (double) pcm.size() / S2S_MODEL_RATE);

@@ -17,7 +17,7 @@ static float model_size(const std::string & name) {
         const char * start = name.c_str() + i + 1;
         char *       end   = nullptr;
         const float  size  = strtof(start, &end);
-        if (end != start && end[0] == 'b' && end[1] == '-') {
+        if (end != start && (end[0] == 'b' || end[0] == 'B') && end[1] == '-') {
             return size;
         }
     }

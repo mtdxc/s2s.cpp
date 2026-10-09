@@ -12,20 +12,20 @@ while staying ready to be interrupted at any instant.
 | Echo cancellation | LocalVQE v1.3 | LocalAI-io/LocalVQE | best GPU |
 | Voice activity | Silero VAD v5 | onnx-community/silero-vad | CPU, 1 thread |
 | End of turn | Smart Turn v3.2 | pipecat-ai/smart-turn-v3 | CPU |
-| Recognition | Parakeet Ultra, or Parakeet TDT 0.6B v3 | moondream/parakeet-ultra, nvidia/parakeet-tdt-0.6b-v3 | best GPU |
+| Recognition | Qwen3-ASR 1.7B, or 0.6B | Serveurperso/Qwen3-ASR-GGUF | best GPU |
 | Synthesis | Qwen3-TTS 1.7B Base | qwentts.cpp submodule | best GPU |
 | Reasoning | any OpenAI chat completions endpoint | external | external |
 
 The VAD runs on every 32 ms window, so it stays on the CPU with a single
 thread: the model is 2 MB and a GPU dispatch would cost more than the
 work. Smart Turn runs once per speech to silence boundary, on the CPU as
-well. LocalVQE, Parakeet and Qwen3-TTS take the best device
+well. LocalVQE, Qwen3-ASR and Qwen3-TTS take the best device
 `ggml_backend_init_best` finds, or the one `GGML_BACKEND` names.
 
 The models are found in `--models` by file name. For each one the server
 takes the largest model present, then the best quant up to Q8_0, F32 and
-BF16 last; the talker must be a `base` one, and Parakeet Ultra wins over
-Parakeet TDT 0.6B v3 when both are present. The six files really
+BF16 last; the talker must be a `base` one, and Qwen3-ASR 1.7B wins over
+0.6B when both are present. The six files really
 loaded are logged at startup and published on `/props`.
 
 ## Threading
@@ -65,7 +65,7 @@ answers a turn: a `session.update` lands on the next answer, never under
 a running one. A turn that a later one superseded during its recognition
 gets no answer, and a closed connection drops the turns still queued.
 
-Every model keeps one context for the whole process. Silero and Parakeet
+Every model keeps one context for the whole process. Silero and Qwen3-ASR
 serialize their compute behind a mutex, Smart Turn on its own worker
 thread, which keeps a single OpenMP team of encoder threads whatever
 connection asks; LocalVQE and the TTS
@@ -443,6 +443,7 @@ the same for the MCP servers.
 | `src/smart-turn.h` | end of turn lib, C ABI |
 | `src/parakeet.h` | ASR lib, C ABI |
 | `src/pipeline-asr.h`, `src/fastconformer-forward.h`, `src/tdt-decoder.h`, `src/sp-detok.h` | Parakeet internals |
+| `qwenasr.cpp/src/qwenasr.h` | Qwen3-ASR library, C ABI, used by the voice loop |
 | `src/s2s-session.h` | turn state machine |
 | `src/http-client.h` | what the HTTP clients share: one client per host, cancelled from a watching thread |
 | `src/llm-client.h` | chat completions SSE client, the model list and the two tool routes |

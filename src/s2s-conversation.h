@@ -10,12 +10,13 @@
 #include "audio-resample.h"
 #include "llm-agent.h"
 #include "localvqe.h"
-#include "parakeet.h"
+#include "qwenasr.h"
 #include "realtime-proto.h"
 #include "silero.h"
 #include "smart-turn.h"
 #include "tts-bridge.h"
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -25,7 +26,8 @@
 struct ServerModels {
     sv_context * vad  = nullptr;
     st_context * turn = nullptr;
-    pk_context * asr  = nullptr;
+    qa_context * asr  = nullptr;
+    mutable std::mutex asr_mutex;
     tts_bridge * tts  = nullptr;
     lv_context * aec  = nullptr;
 };
