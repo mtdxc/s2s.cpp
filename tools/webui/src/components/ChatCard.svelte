@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { ChevronDown, ChevronRight } from '@lucide/svelte';
+	import { ChevronDown, ChevronRight, Trash2 } from '@lucide/svelte';
 	import { app, settings } from '../lib/state.svelte.js';
-	import { voice, type ChatEntry, type ChatTool } from '../lib/voice.svelte.js';
+	import { clearContext, voice, type ChatEntry, type ChatTool } from '../lib/voice.svelte.js';
 
 	let body: HTMLDivElement | null = $state(null);
 
@@ -68,14 +68,24 @@
 </script>
 
 <div class="card">
-	<button class="card-header" onclick={() => (settings.chatOpen = !settings.chatOpen)}>
-		{#if settings.chatOpen}
-			<ChevronDown size={14} />
-		{:else}
-			<ChevronRight size={14} />
-		{/if}
-		<span class="card-label">Conversation</span>
-	</button>
+	<div class="card-header">
+		<button class="card-toggle" onclick={() => (settings.chatOpen = !settings.chatOpen)}>
+			{#if settings.chatOpen}
+				<ChevronDown size={14} />
+			{:else}
+				<ChevronRight size={14} />
+			{/if}
+			<span class="card-label">Conversation</span>
+		</button>
+		<button
+			class="clear-btn"
+			onclick={clearContext}
+			title="Clear conversation"
+			aria-label="Clear conversation"
+		>
+			<Trash2 size={14} />
+		</button>
+	</div>
 	{#if settings.chatOpen}
 		<div class="chat-body" bind:this={body}>
 			{#if system}
@@ -117,16 +127,22 @@
 	.card-header {
 		display: flex;
 		align-items: center;
+		background: var(--bg-input);
+	}
+	.card-toggle {
+		display: flex;
+		flex: 1;
+		align-items: center;
 		gap: 0.4rem;
 		padding: 0.3rem 0.5rem;
-		background: var(--bg-input);
 		border: none;
+		background: transparent;
 		cursor: pointer;
 		color: var(--fg);
 		font-size: 0.8rem;
 		text-align: left;
 	}
-	.card-header:hover {
+	.card-toggle:hover {
 		background: var(--bg-btn-hover);
 	}
 	.card-label {
@@ -142,6 +158,21 @@
 		font-size: 0.7rem;
 		line-height: 1.4;
 		color: var(--fg-dim);
+	}
+	.clear-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		margin-right: 0.45rem;
+		padding: 0.2rem;
+		border: none;
+		background: transparent;
+		color: var(--fg-dim);
+		cursor: pointer;
+		line-height: 0;
+	}
+	.clear-btn:hover {
+		color: var(--fg);
 	}
 	/* the speaker is told by its colour, inline, with no line of its own */
 	.who {

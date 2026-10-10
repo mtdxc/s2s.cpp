@@ -363,10 +363,18 @@ static void close_answer(Cli * cli) {
 }
 
 // Every frame the engine sends, on its writer thread.
-static bool on_event(const std::string & frame, void * user) {
+static bool on_event(const SendData & frame, void * user) {
     Cli * cli = (Cli *) user;
+    if (frame.bin) {
+        if (cli->context.answering) {
+            std::vector<float> pcm;
+            rt_pcm16_to_float((const uint8_t *)frame.data.c_str(), frame.data.size(), pcm);
+            cli->context.queued += audio_play(cli->audio, pcm);
+        }
+        return true;
+    }
 
-    yyjson_doc * doc = yyjson_read(frame.c_str(), frame.size(), 0);
+    yyjson_doc * doc = yyjson_read(frame.data.c_str(), frame.data.size(), 0);
     if (!doc) {
         return true;
     }
@@ -658,6 +666,8 @@ int main(int argc, char ** argv) {
             llm_model = argv[++i];
         } else if (arg == "--llm-timeout" && has_value) {
             llm_timeout = atoi(argv[++i]);
+        } else if (arg == "--llm-key" && has_value) {
+            llm_key = argv[++i];     
         } else if (arg == "--llm-key-file" && has_value) {
             if (!read_key(argv[++i], llm_key)) {
                 return 1;
@@ -918,6 +928,9 @@ int main(int argc, char ** argv) {
             ref_frame[i] = pair[2 * i + 1];
             played       = played || ref_frame[i] != 0.0f;
         }
+#if 1
+        conn_append_audio(conn, mic_frame.data(), CLI_FRAME_SAMPLES, played ? ref_frame.data() : nullptr);
+#else
         const std::string audio = rt_float_to_pcm16_base64(mic_frame.data(), CLI_FRAME_SAMPLES);
         const std::string reference =
             cli.aec && played ? rt_float_to_pcm16_base64(ref_frame.data(), CLI_FRAME_SAMPLES) : "";
@@ -927,6 +940,7 @@ int main(int argc, char ** argv) {
             rt_frame_str(append, "reference", reference);
         }
         conn_frame(conn, rt_frame_end(append));
+#endif
     }
 
     g_stop = true;

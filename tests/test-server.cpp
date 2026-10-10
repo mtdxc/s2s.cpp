@@ -508,8 +508,24 @@ int main(int argc, char ** argv) {
         std::string frame;
         bool        audio_seen = false;
         while (running) {
-            if (client.read(frame) == httplib::ws::ReadResult::Fail) {
+            int res = client.read(frame);
+            if (res == httplib::ws::ReadResult::Fail) {
                 break;
+            }
+
+            const double      now  = timer.ms() / 1000.0;
+            if (res == httplib::ws::ReadResult::Binary) {
+                std::vector<float> pcm;
+                rt_pcm16_to_float((const uint8_t *)frame.data(), frame.size(), pcm);
+                std::lock_guard<std::mutex> lock(speaker.mutex);
+                audio_bytes += frame.size();
+                speaker.queue.insert(speaker.queue.end(), pcm.begin(), pcm.end());
+                // The first chunk of each response marks when its sound starts.
+                if (!audio_seen) {
+                    printf("[Event] %7.2fs  response.output_audio.delta\n", now);
+                    audio_seen = true;
+                }
+                continue;
             }
 
             yyjson_doc * doc = yyjson_read(frame.c_str(), frame.size(), 0);
@@ -518,7 +534,6 @@ int main(int argc, char ** argv) {
             }
             yyjson_val *      root = yyjson_doc_get_root(doc);
             const std::string type = rt_json_str(root, "type");
-            const double      now  = timer.ms() / 1000.0;
 
             n_events++;
             {

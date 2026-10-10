@@ -80,8 +80,12 @@ struct ConversationSetup {
     std::vector<std::string> llm_hosts;
 };
 
+struct SendData {
+    std::string data;
+    bool bin = false;
+};
 // Delivers one frame to the client. Returns false once the client is gone.
-typedef bool (*conn_send_fn)(const std::string & frame, void * user);
+typedef bool (*conn_send_fn)(const SendData & frame, void * user);
 
 struct Connection;
 
@@ -91,6 +95,7 @@ Connection * conn_open(const ConversationSetup * setup, int id, conn_send_fn sen
 
 // Handles one text frame the client sent, on the thread that reads them.
 void conn_frame(Connection * conn, const std::string & frame);
+void conn_append_audio(Connection * conn, const float* data, int samples, const float* reference);
 
 // Whether the conversation is over on its side: the client is gone, or too
 // slow to take what is sent.
