@@ -5,6 +5,25 @@
 
 	let lines = $state<string[]>([]);
 
+	function maxLines(): number {
+		const configured = Number(settings.logMaxLines);
+		return Number.isFinite(configured) && configured >= 1
+			? Math.min(Math.floor(configured), 10000)
+			: LOG_MAX_LINES;
+	}
+
+	function setMaxLines(event: Event) {
+		settings.logMaxLines = (event.currentTarget as HTMLInputElement).value;
+	}
+
+	function trimLines(limit = maxLines()) {
+		if (lines.length > limit) {
+			lines.splice(0, lines.length - limit);
+		}
+	}
+
+	$effect(() => trimLines(maxLines()));
+
 	$effect(() => {
 		let es: EventSource | null = null;
 		let timer = 0;
@@ -13,7 +32,7 @@
 			es = new EventSource('logs');
 			es.onmessage = (e: MessageEvent) => {
 				lines.push(e.data);
-				if (lines.length > LOG_MAX_LINES) lines.splice(0, lines.length - LOG_MAX_LINES);
+				trimLines();
 			};
 			es.onerror = () => {
 				es?.close();
@@ -41,6 +60,18 @@
 			{/if}
 			<span class="card-label">Server logs</span>
 		</button>
+		<label class="line-limit" title="Maximum number of displayed log lines">
+			<span class="sr-only">Maximum log lines</span>
+			<input
+				type="number"
+				min="1"
+				max="10000"
+				step="1"
+				value={settings.logMaxLines}
+				oninput={setMaxLines}
+				aria-label="Maximum log lines"
+			/>
+		</label>
 		<button
 			class="clear-btn"
 			onclick={() => (lines = [])}
@@ -87,6 +118,31 @@
 	}
 	.card-label {
 		font-weight: 600;
+	}
+	.line-limit {
+		display: flex;
+		align-items: center;
+	}
+	.line-limit input {
+		width: 4.5rem;
+		padding: 0.15rem 0.25rem;
+		border: 1px solid var(--border);
+		border-radius: 3px;
+		background: var(--bg-card);
+		color: var(--fg);
+		font: inherit;
+		font-size: 0.7rem;
+	}
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
 	}
 	.clear-btn {
 		display: inline-flex;
