@@ -1,0 +1,16 @@
+ src/pipeline-tts.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/pipeline-tts.cpp b/src/pipeline-tts.cpp
+index 7e64d76..1ec5968 100644
+--- a/src/pipeline-tts.cpp
++++ b/src/pipeline-tts.cpp
+@@ -764,7 +764,7 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
+     std::vector<float> ref_spk_emb;
+     const float *      ref_spk_emb_ptr = NULL;
+     if (has_lat_spk) {
+-        if (lat_spk_dim != pt->talker.hidden_size) {
++        if (lat_spk_dim < pt->talker.hidden_size) {
+             qt_set_error("tts_engine_admit: ref_spk_dim %d mismatches talker hidden %d", lat_spk_dim,
+                          pt->talker.hidden_size);
+             qt_log(QT_LOG_ERROR, "[Pipeline] ref_spk_dim %d mismatches talker hidden %d", lat_spk_dim,
