@@ -7,6 +7,7 @@
 //
 // Client to server:
 //   session.update                   settings: mode, endpoint, voice, thresholds
+//   binary audio                     PCM16 microphone, aligned sample for sample
 //   input_audio_buffer.append        base64 PCM16 from the microphone, plus
 //                                    the reference the client played during
 //                                    the same samples when it is not silent
@@ -29,7 +30,8 @@
 //                                    deltas of the written text
 //   response.tool_call.done          the call ended: ok, the ms it ran and
 //                                    the bytes of its result
-//   response.output_audio.delta
+//   response.output_audio.delta      base64 PCM16 binary frames to speaker
+//   binary audio                     PCM16 binary frames to speaker
 //   response.output_audio_transcript.delta
 //                                    what the voice speaks, one unit at a
 //                                    time, with text_end: how far into the
@@ -203,16 +205,21 @@ static std::vector<uint8_t> rt_base64_decode(const char * data, size_t size) {
 // PCM16 little endian to float, and back. The client speaks PCM16 because
 // that is what the protocol carries and what an AudioWorklet produces
 // cheaply.
-static void rt_pcm16_to_float(const std::vector<uint8_t> & bytes, std::vector<float> & out) {
-    out.resize(bytes.size() / 2);
-    for (size_t i = 0; i < out.size(); i++) {
+static void rt_pcm16_to_float(const uint8_t * bytes, size_t count, std::vector<float> & out) {
+    size_t samples = count / 2;
+    out.resize(samples);
+    for (size_t i = 0; i < samples; i++) {
         const int16_t sample = (int16_t) ((uint16_t) bytes[2 * i] | ((uint16_t) bytes[2 * i + 1] << 8));
         out[i]               = (float) sample / 32768.0f;
     }
 }
+static void rt_pcm16_to_float(const std::vector<uint8_t> & bytes, std::vector<float> & out) {
+    rt_pcm16_to_float(bytes.data(), bytes.size(), out);
+}
 
-static std::string rt_float_to_pcm16_base64(const float * pcm, size_t n_samples) {
-    std::vector<uint8_t> bytes(n_samples * 2);
+static std::string rt_float_to_pcm16(const float * pcm, size_t n_samples) {
+    std::string bytes;
+    bytes.resize(n_samples * 2);
     for (size_t i = 0; i < n_samples; i++) {
         float value          = pcm[i];
         value                = value > 1.0f ? 1.0f : (value < -1.0f ? -1.0f : value);
@@ -220,7 +227,12 @@ static std::string rt_float_to_pcm16_base64(const float * pcm, size_t n_samples)
         bytes[2 * i]         = (uint8_t) ((uint16_t) sample & 0xff);
         bytes[2 * i + 1]     = (uint8_t) (((uint16_t) sample >> 8) & 0xff);
     }
-    return rt_base64_encode(bytes.data(), bytes.size());
+    return bytes;
+}
+
+static std::string rt_float_to_pcm16_base64(const float * pcm, size_t n_samples) {
+    auto bytes = rt_float_to_pcm16(pcm, n_samples);
+    return rt_base64_encode((const uint8_t *) bytes.c_str(), bytes.size());
 }
 
 static std::string rt_json_str(yyjson_val * object, const char * key) {

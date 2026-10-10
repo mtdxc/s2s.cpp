@@ -265,7 +265,7 @@ struct Connection {
     // every connection shares.
     std::mutex              out_mutex;
     std::condition_variable out_cv;
-    std::queue<std::string> out;
+    std::queue<SendData> out;
     bool                    out_stop = false;
 
     // The endpoint client, the responder's alone. It lives across turns so its
@@ -364,7 +364,17 @@ struct Connection {
 static void conn_send(Connection * conn, std::string frame) {
     std::lock_guard<std::mutex> lock(conn->out_mutex);
     if (!conn->out_stop) {
-        conn->out.push(std::move(frame));
+        conn->out.push(SendData{std::move(frame), false});
+        conn->out_cv.notify_one();
+    }
+}
+
+// send binary
+static void conn_send(Connection * conn, const float* frame, int samples) {
+    std::lock_guard<std::mutex> lock(conn->out_mutex);
+    if (!conn->out_stop) {
+        auto pcm16 = rt_float_to_pcm16(frame, samples);
+        conn->out.push(SendData{std::move(pcm16), true});
         conn->out_cv.notify_one();
     }
 }
@@ -471,7 +481,7 @@ static void conn_stop(Connection * conn) {
 static void conn_writer(Connection * conn) {
     s2s_log_thread(("Writer-" + std::to_string(conn->id)).c_str());
     for (;;) {
-        std::string frame;
+        SendData frame;
         {
             std::unique_lock<std::mutex> lock(conn->out_mutex);
             conn->out_cv.wait(lock, [conn]() { return conn->out_stop || !conn->out.empty(); });
@@ -486,7 +496,7 @@ static void conn_writer(Connection * conn) {
             {
                 std::lock_guard<std::mutex> lock(conn->out_mutex);
                 conn->out_stop = true;
-                std::queue<std::string>().swap(conn->out);
+                std::queue<SendData>().swap(conn->out);
             }
             conn_stop(conn);
             return;
@@ -555,7 +565,7 @@ static bool conn_speak(Connection * conn, const SentenceUnit & unit, const tts_r
     speak_tap.conn   = conn;
     speak_tap.unit   = &unit;
     speak_tap.jarvis = tts.effect == "jarvis";
-
+    s2s_log(S2S_LOG_INFO, "[TTS] Speaking unit: %s", unit.text.c_str());
     const bool spoke = tts_bridge_speak(
         conn->setup->models.tts, unit.text, tts,
         [](const float * pcm, size_t n_samples, void * user) {
@@ -570,7 +580,8 @@ static bool conn_speak(Connection * conn, const SentenceUnit & unit, const tts_r
                 jarvis_fx_process(self->conn->fx, out.data(), n_samples);
                 pcm = out.data();
             }
-            conn_send(self->conn, rt_event_audio(pcm, n_samples));
+            conn_send(self->conn, pcm, n_samples);
+            // conn_send(self->conn, rt_event_audio(pcm, n_samples));
             return !self->conn->cancel.load();
         },
         &speak_tap, &conn->cancel);
@@ -1337,7 +1348,7 @@ Connection * conn_open(const ConversationSetup * setup, int id, conn_send_fn sen
     conn->session = s2s_session_new(setup->models.vad, setup->models.turn, conn->params, conn_on_session_event, conn);
     if (!conn->session) {
         s2s_log(S2S_LOG_WARN, "%s", sv_last_error());
-        send(rt_event_error(sv_last_error()), send_user);
+        send({rt_event_error(sv_last_error()), false}, send_user);
         jarvis_fx_free(conn->fx);
         delete conn;
         return nullptr;
@@ -1347,6 +1358,29 @@ Connection * conn_open(const ConversationSetup * setup, int id, conn_send_fn sen
     conn->recognizer = std::thread(conn_recognizer, conn);
     conn->responder  = std::thread(conn_responder, conn);
     return conn;
+}
+
+void conn_append_audio(Connection * conn, const float* data, int samples, const float* reference) {
+    if (!conn->receiving) {
+        conn->receiving = true;
+        s2s_log(S2S_LOG_INFO, "[Realtime] Microphone streaming, %d samples per frame", samples);
+    }
+    audio_resample_stream_push(&conn->mic_resample, data, samples, conn->resampled);
+    if (conn->aec) {
+        // A frame without reference is a frame where nothing played.
+        bool played = reference != nullptr;
+        if (!played) {
+            conn->silence.assign(samples, 0.0f);
+            reference = conn->silence.data();
+        }
+        audio_resample_stream_push(&conn->ref_resample, reference, samples, conn->reference);
+        conn_cancel_echo(conn, conn->resampled, conn->reference, played);
+    }
+    {
+        std::lock_guard<std::mutex> lock(conn->session_mutex);
+        s2s_session_set_speaking(conn->session, conn->speaking.load());
+        s2s_session_push(conn->session, conn->resampled.data(), conn->resampled.size());
+    }
 }
 
 void conn_frame(Connection * conn, const std::string & frame) {
@@ -1369,27 +1403,8 @@ void conn_frame(Connection * conn, const std::string & frame) {
             break;
 
         case RT_CLIENT_AUDIO_APPEND:
-            if (!conn->receiving) {
-                conn->receiving = true;
-                s2s_log(S2S_LOG_INFO, "[Realtime] Microphone streaming, %zu samples per frame", message.audio.size());
-            }
-            audio_resample_stream_push(&conn->mic_resample, message.audio.data(), message.audio.size(),
-                                       conn->resampled);
-            if (conn->aec) {
-                // A frame without reference is a frame where nothing played.
-                const bool played = message.reference.size() == message.audio.size();
-                if (!played) {
-                    conn->silence.assign(message.audio.size(), 0.0f);
-                }
-                const std::vector<float> & played_pcm = played ? message.reference : conn->silence;
-                audio_resample_stream_push(&conn->ref_resample, played_pcm.data(), played_pcm.size(), conn->reference);
-                conn_cancel_echo(conn, conn->resampled, conn->reference, played);
-            }
-            {
-                std::lock_guard<std::mutex> lock(conn->session_mutex);
-                s2s_session_set_speaking(conn->session, conn->speaking.load());
-                s2s_session_push(conn->session, conn->resampled.data(), conn->resampled.size());
-            }
+            conn_append_audio(conn, message.audio.data(), message.audio.size(),
+                message.reference.size() == message.audio.size() ? message.reference.data() : nullptr);
             break;
 
         case RT_CLIENT_RESPONSE_CANCEL:

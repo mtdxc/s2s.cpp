@@ -94,6 +94,7 @@ static void print_usage(const char * prog) {
             "  --llm-url <url>        OpenAI compatible endpoint\n"
             "  --llm-model <name>     Model on that endpoint\n"
             "  --llm-key-file <path>  File holding its API key, read at startup\n"
+            "  --llm-key <key>         API key for the LLM, read at startup\n"
             "  --mcp <url>            MCP server the agentic mode uses, repeatable, Streamable HTTP\n"
             "  --mcp-key-file <path>  File holding the key of the --mcp named before it\n"
             "\n"
@@ -177,6 +178,9 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             setup.llm_fixed = true;
+        } else if (arg == "--llm-key" && has_value) {
+            llm_defaults.api_key = argv[++i];
+            setup.llm_fixed = true;
         } else if (arg == "--mcp" && has_value) {
             mcp_server_params server;
             server.url = argv[++i];
@@ -222,6 +226,10 @@ int main(int argc, char ** argv) {
 
     httplib::Server server;
     g_server = &server;
+
+    // A WebSocket can stream audio and text for a long time, so allow more
+    // time for slow clients or congested networks to flush writes.
+    server.set_write_timeout(120);
 
     // The pool threads serve requests, and a WebSocket connection names its
     // reader for as long as it lasts.
@@ -550,18 +558,25 @@ int main(int argc, char ** argv) {
 
         Connection * conn = conn_open(
             &setup, id,
-            [](const std::string & frame, void * user) { return ((httplib::ws::WebSocket *) user)->send(frame); }, &ws);
+            [](const SendData & frame, void * user) {
+                auto ws = (httplib::ws::WebSocket *) user;
+                return frame.bin ? ws->send(frame.data.data(), frame.data.size()) : ws->send(frame.data);
+            }, 
+            &ws);
         if (!conn) {
             return;
         }
 
         std::string frame;
-        for (;;) {
+        while (!conn_stopped(conn)) {
             const httplib::ws::ReadResult result = ws.read(frame);
-            if (result == httplib::ws::ReadResult::Fail || conn_stopped(conn)) {
+            if (result == httplib::ws::ReadResult::Fail) {
                 break;
             }
             if (result != httplib::ws::ReadResult::Text) {
+                std::vector<float> audio_float;
+                rt_pcm16_to_float((const uint8_t *) frame.data(), frame.size(), audio_float);
+                conn_append_audio(conn, audio_float.data(), audio_float.size(), nullptr);
                 continue;
             }
             conn_frame(conn, frame);

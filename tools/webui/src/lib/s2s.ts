@@ -392,14 +392,19 @@ function workletUrl(source: string): string {
 	return URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
 }
 
-function toBase64(pcm: Float32Array): string {
-	const bytes = new Uint8Array(pcm.length * 2);
-	const view = new DataView(bytes.buffer);
+function toPcm16(pcm: Float32Array): ArrayBuffer {
+	const buffer = new ArrayBuffer(pcm.length * 2);
+	const view = new DataView(buffer);
 	for (let i = 0; i < pcm.length; i++) {
 		const clamped = Math.max(-1, Math.min(1, pcm[i]));
 		view.setInt16(i * 2, clamped * 32767, true);
 	}
+	return buffer;
+}
+
+function toBase64(pcm: Float32Array): string {
 	let binary = '';
+	const bytes = new Uint8Array(toPcm16(pcm));
 	for (let i = 0; i < bytes.length; i += 0x8000) {
 		binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
 	}
@@ -412,8 +417,12 @@ function fromBase64(data: string): Float32Array {
 	for (let i = 0; i < binary.length; i++) {
 		bytes[i] = binary.charCodeAt(i);
 	}
-	const view = new DataView(bytes.buffer);
-	const pcm = new Float32Array(bytes.length / 2);
+	return fromPcm16(bytes);
+}
+
+function fromPcm16(bytes: Uint8Array): Float32Array {
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const pcm = new Float32Array(Math.floor(bytes.length / 2));
 	for (let i = 0; i < pcm.length; i++) {
 		pcm[i] = view.getInt16(i * 2, true) / 32768;
 	}
@@ -748,11 +757,17 @@ export class S2S {
 	// frame played something: silence is what its absence means.
 	private sendAudio(mic: Float32Array, ref: Float32Array) {
 		const reference = serverCancels(this.echo()) && ref.some((sample) => sample !== 0);
-		this.send({
-			type: 'input_audio_buffer.append',
-			audio: toBase64(mic),
-			...(reference ? { reference: toBase64(ref) } : {})
-		});
+		if (!reference) {
+			if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+				this.ws.send(toPcm16(mic));
+			}
+		} else {
+			this.send({
+				type: 'input_audio_buffer.append',
+				audio: toBase64(mic),
+				...(reference ? { reference: toBase64(ref) } : {})
+			});
+		}
 	}
 
 	private echo(): S2SEcho {
@@ -868,6 +883,7 @@ export class S2S {
 		return new Promise((resolve, reject) => {
 			const url = realtimeUrl(this.options.url);
 			const ws = new WebSocket(url);
+			ws.binaryType = 'arraybuffer';
 			this.ws = ws;
 
 			this.log(`Connecting to ${url}`);
@@ -904,8 +920,25 @@ export class S2S {
 				}
 				this.reconnect(run);
 			};
-			ws.onmessage = (event) => this.onServerEvent(event.data as string);
+			ws.onmessage = (event) => {
+				if (typeof event.data === 'string') {
+					this.onServerEvent(event.data);
+				} else if (event.data instanceof ArrayBuffer) {
+					if (this.answering) {
+						this.onServerAudio(fromPcm16(new Uint8Array(event.data)));
+					}
+				}
+			};
 		});
+	}
+
+	private onServerAudio(pcm: Float32Array) {
+		if (!this.answering) {
+			return;
+		}
+		this.queuedSamples += pcm.length;
+		this.duplex?.port.postMessage(pcm);
+		this.setState('speaking');
 	}
 
 	private onServerEvent(raw: string) {
@@ -1007,10 +1040,7 @@ export class S2S {
 
 			case 'response.output_audio.delta':
 				if (this.answering) {
-					const pcm = fromBase64(String(message.delta ?? ''));
-					this.queuedSamples += pcm.length;
-					this.duplex?.port.postMessage(pcm);
-					this.setState('speaking');
+					this.onServerAudio(fromBase64(String(message.delta ?? '')));
 				}
 				break;
 
