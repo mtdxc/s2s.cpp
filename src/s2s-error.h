@@ -32,6 +32,18 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#if defined(_WIN32)
+#    ifndef WIN32_LEAN_AND_MEAN
+#        define WIN32_LEAN_AND_MEAN
+#    endif
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    include <windows.h>
+#else
+#    include <sys/time.h>
+#endif
 
 enum s2s_log_level {
     S2S_LOG_ERROR = 0,
@@ -104,13 +116,30 @@ struct S2SLogThread {
 inline std::string s2s_log_named(const std::string & msg) {
     const std::string & own    = s2s_log_thread_name();
     const std::string & thread = own.empty() ? s2s_log_default_name() : own;
+#if defined(_WIN32)
+    SYSTEMTIME local_time;
+    GetLocalTime(&local_time);
+    const int hour = local_time.wHour;
+    const int minute = local_time.wMinute;
+    const int second = local_time.wSecond;
+    const int milliseconds = local_time.wMilliseconds;
+#else
+    timeval now;
+    gettimeofday(&now, nullptr);
+    struct tm local_time;
+    localtime_r(&now.tv_sec, &local_time);
+    const int hour = local_time.tm_hour;
+    const int minute = local_time.tm_min;
+    const int second = local_time.tm_sec;
+    const int milliseconds = static_cast<int>(now.tv_usec / 1000);
+#endif
+    char time_buf[512];
     if (thread.empty()) {
-        return msg;
+        snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d.%03d %d ", hour, minute, second, milliseconds, std::this_thread::get_id());
+    } else {
+        snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d.%03d %s ", hour, minute, second, milliseconds, thread.c_str());
     }
-    if (!msg.empty() && msg[0] == '[') {
-        return "[" + thread + "-" + msg.substr(1);
-    }
-    return "[" + thread + "] " + msg;
+    return time_buf + msg;
 }
 
 inline void s2s_log(enum s2s_log_level level, const char * fmt, ...)

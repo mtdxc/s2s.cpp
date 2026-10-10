@@ -1,4 +1,4 @@
-import type { Mode } from './config.js';
+import { LOG_MAX_LINES, type Mode } from './config.js';
 import type { S2SEcho } from './s2s.js';
 import type { S2SProps } from './types.js';
 
@@ -62,6 +62,7 @@ export interface Settings {
 	volume: number;
 	chatOpen: boolean;
 	logsOpen: boolean;
+	logMaxLines: string;
 	dark: boolean;
 }
 
@@ -121,6 +122,7 @@ function defaults(): Settings {
 		volume: 1,
 		chatOpen: true,
 		logsOpen: true,
+		logMaxLines: String(LOG_MAX_LINES),
 		dark: true
 	};
 }
@@ -218,6 +220,7 @@ $effect.root(() => {
 			volume: settings.volume,
 			chatOpen: settings.chatOpen,
 			logsOpen: settings.logsOpen,
+			logMaxLines: settings.logMaxLines,
 			dark: settings.dark
 		};
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
