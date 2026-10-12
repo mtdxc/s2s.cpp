@@ -511,8 +511,7 @@ int main(int argc, char ** argv) {
         // A list is one visit: the MCP sessions it opens end with it. The
         // built-in tools are only shown.
         llm_agent *                          agent    = llm_agent_new(servers);
-        const std::vector<llm_agent_builtin> builtins = { { conn_voice_tool(setup.models.tts) },
-                                                          { conn_sleep_tool() } };
+        auto builtins = conn_builtin_tools(nullptr, &setup);
         std::vector<llm_agent_group>         groups;
         const bool                           listed = llm_agent_tools(agent, builtins, params, nullptr, groups);
         llm_agent_free(agent);

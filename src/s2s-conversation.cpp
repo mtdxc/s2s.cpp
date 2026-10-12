@@ -659,6 +659,49 @@ static bool conn_sleep(const std::string &, void * user, std::string & result) {
     return true;
 }
 
+static bool conn_time(const std::string &, void * user, std::string & result) {
+    time_t now = time(nullptr);
+    result = ctime(&now);
+    return true;
+}
+
+llm_tool conn_time_tool() {
+    static const char* TIME_TOOL = "time";       // and built-in time tool
+    static const std::string about = u8"获取当前时间, 当查询时间或日期时使用";
+
+    yyjson_mut_doc * doc  = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_val * root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_str(doc, root, "type", "function");
+    yyjson_mut_val * function = yyjson_mut_obj_add_obj(doc, root, "function");
+    yyjson_mut_obj_add_str(doc, function, "name", TIME_TOOL);
+    yyjson_mut_obj_add_strn(doc, function, "description", about.c_str(), about.size());
+    yyjson_mut_val * parameters = yyjson_mut_obj_add_obj(doc, function, "parameters");
+    yyjson_mut_obj_add_str(doc, parameters, "type", "object");
+    yyjson_mut_obj_add_obj(doc, parameters, "properties");
+
+    char *   json = yyjson_mut_write(doc, 0, nullptr);
+    llm_tool tool = { TIME_TOOL, json ? json : "{}" };
+    free(json);
+    yyjson_mut_doc_free(doc);
+    return tool;
+}
+
+std::vector<llm_agent_builtin> conn_builtin_tools(Connection * conn, const ConversationSetup* setup) {
+    std::vector<llm_agent_builtin> builtins;
+    if (conn) {
+        VoiceSwitch voice_switch = { conn, &conn->client.tts };
+        builtins.push_back({ conn_voice_tool(conn->setup->models.tts), conn_set_voice, &voice_switch });
+        builtins.push_back({ conn_sleep_tool(),                        conn_sleep,     conn          });
+        builtins.push_back({ conn_time_tool(),                         conn_time,      conn          });
+    } else if(setup) {
+        builtins.push_back({ conn_voice_tool(setup->models.tts) });
+        builtins.push_back({ conn_sleep_tool() });
+        builtins.push_back({ conn_time_tool() });
+    }
+    return builtins;
+}
+
 // Whether a turn reaches the model, in the conversation and agentic modes.
 // Asleep, only the turn that wakes the assistant gets through, and none with
 // the gate off; a turn that got through keeps doing so through its
@@ -914,11 +957,7 @@ static void conn_answer(Connection * conn, const AnswerJob & job) {
             }
 
             // The built-in tools act on this answer and this connection.
-            VoiceSwitch                          voice_switch = { conn, &client.tts };
-            const std::vector<llm_agent_builtin> builtins     = {
-                { conn_voice_tool(conn->setup->models.tts), conn_set_voice, &voice_switch },
-                { conn_sleep_tool(),                        conn_sleep,     conn          }
-            };
+            auto builtins = conn_builtin_tools(conn, conn->setup);
 
             Timer      t_llm;
             const bool streamed =
