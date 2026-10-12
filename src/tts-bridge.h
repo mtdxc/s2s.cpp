@@ -51,7 +51,7 @@ struct tts_sampling {
 // synthesis.
 struct tts_guards {
     int   min_chars        = 3;      // below this a loopback transcript is not spoken back
-    float chars_per_second = 15.0f;  // speech rate used to budget the frames
+    float chars_per_second = 5.0f;  // speech rate used to budget the frames
     float margin_seconds   = 2.0f;   // added to the budget, and its floor
 };
 
