@@ -123,6 +123,9 @@ llm_tool conn_sleep_tool();
 // lists and every effect.
 llm_tool conn_voice_tool(const tts_bridge * tts);
 
+// return buildin toollist
+std::vector<llm_agent_builtin> conn_builtin_tools(Connection * conn, const ConversationSetup* setup);
+
 // Host of an endpoint URL, with its port when it carries one: what an
 // allowlist entry is compared against.
 std::string url_host(const std::string & url);
