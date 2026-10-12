@@ -90,6 +90,8 @@ static void print_usage(const char * prog) {
             "Server:\n"
             "  --host <addr>          Bind address (default: 127.0.0.1)\n"
             "  --port <N>             Bind port (default: 8088)\n"
+            "  --ssl                  Enable SSL, make sure certs dir exist mycert.key mycert.cert, or use bellow cmd to gen one\n"
+            "                         openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes -keyout mycert.key -out mycert.pem\n"
             "\n"
             "Endpoint, set by the server, hidden from and fixed for every session:\n"
             "  --llm-url <url>        OpenAI compatible endpoint\n"
@@ -130,7 +132,7 @@ int main(int argc, char ** argv) {
     // without a name is the compute worker of qwentts.
     s2s_log_thread("Main");
     s2s_log_thread_default("TTS");
-
+    bool ssl = false;
     std::string models_dir = "models";
     std::string voices_dir = "voices";
     std::string host       = "127.0.0.1";
@@ -157,7 +159,9 @@ int main(int argc, char ** argv) {
         const std::string arg       = argv[i];
         const bool        has_value = i + 1 < argc;
 
-        if (arg == "--models" && has_value) {
+        if (arg == "--ssl") {
+            ssl = true;
+        } else if (arg == "--models" && has_value) {
             models_dir = argv[++i];
         } else if (arg == "--voices" && has_value) {
             voices_dir = argv[++i];
@@ -233,17 +237,29 @@ int main(int argc, char ** argv) {
     setup.llm_hosts = llm_hosts;
 
     setup.defaults.llm = llm_defaults;
-
+#ifdef CPPHTTPLIB_SSL_ENABLED
     httplib::Server server;
+    httplib::SSLServer ssl_server("certs/mycert.pem", "certs/mycert.key");
+    if (ssl && ssl_server.is_valid()) {
+        s2s_log(S2S_LOG_INFO, "[Server] Listening on https://%s:%d", host.c_str(), port);
+        g_server = &ssl_server;
+    } else {
+        s2s_log(S2S_LOG_INFO, "[Server] Listening on http://%s:%d", host.c_str(), port);
+        g_server = &server;
+    }
+#else
+    httplib::Server server;
+    s2s_log(S2S_LOG_INFO, "[Server] Listening on http://%s:%d", host.c_str(), port);
     g_server = &server;
+#endif
 
     // A WebSocket can stream audio and text for a long time, so allow more
     // time for slow clients or congested networks to flush writes.
-    server.set_write_timeout(120);
+    g_server->set_write_timeout(120);
 
     // The pool threads serve requests, and a WebSocket connection names its
     // reader for as long as it lasts.
-    server.set_pre_routing_handler([](const httplib::Request &, httplib::Response &) {
+    g_server->set_pre_routing_handler([](const httplib::Request &, httplib::Response &) {
         s2s_log_thread("HTTP");
         return httplib::Server::HandlerResponse::Unhandled;
     });
@@ -252,7 +268,7 @@ int main(int argc, char ** argv) {
     // SO_REUSEPORT is deliberately not set: a second instance on the same port
     // then fails with EADDRINUSE instead of silently sharing the socket and
     // splitting traffic between two daemons.
-    server.set_socket_options([](socket_t sock) {
+    g_server->set_socket_options([](socket_t sock) {
         int one = 1;
 #ifdef _WIN32
         setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *) &one, sizeof(one));
@@ -261,7 +277,7 @@ int main(int argc, char ** argv) {
 #endif
     });
 
-    server.Get("/logs", [&](const httplib::Request & req, httplib::Response & res) {
+    g_server->Get("/logs", [&](const httplib::Request & req, httplib::Response & res) {
         // The stream carries everything the server did, so it is not public.
         if (!origin_allowed(origins, req)) {
             res.status = 403;
@@ -270,7 +286,7 @@ int main(int argc, char ** argv) {
         handle_logs(req, res);
     });
 
-    server.Get("/health", [](const httplib::Request &, httplib::Response & res) {
+    g_server->Get("/health", [](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\"}", "application/json");
     });
 
@@ -280,7 +296,7 @@ int main(int argc, char ** argv) {
     // line and to the startup log. The LLM sampling is absent, reasoning_effort
     // apart: an empty sampling field leaves the endpoint to its own defaults,
     // whether it is llama-server, Ollama or a cloud API.
-    server.Get("/props", [&](const httplib::Request & req, httplib::Response & res) {
+    g_server->Get("/props", [&](const httplib::Request & req, httplib::Response & res) {
         if (!origin_allowed(origins, req)) {
             res.status = 403;
             return;
@@ -373,7 +389,7 @@ int main(int argc, char ** argv) {
     // Embedded webui: gzipped single page app built by tools/webui.
     // The browser decompresses it through Content-Encoding.
     if (index_html_gz_len > 0) {
-        server.Get("/", [](const httplib::Request & req, httplib::Response & res) {
+        g_server->Get("/", [](const httplib::Request & req, httplib::Response & res) {
             if (req.get_header_value("Accept-Encoding").find("gzip") == std::string::npos) {
                 res.set_content("Error: gzip is not supported by this browser", "text/plain");
             } else {
@@ -388,7 +404,7 @@ int main(int argc, char ** argv) {
     // endpoint. No CORS to negotiate, no endpoint reachable from the client
     // side, and the API key stays on this machine. The body overrides the
     // defaults so the panel can probe a URL before the session opens.
-    server.Post("/v1/models", [&](const httplib::Request & req, httplib::Response & res) {
+    g_server->Post("/v1/models", [&](const httplib::Request & req, httplib::Response & res) {
         if (!origin_allowed(origins, req) || setup.llm_fixed) {
             res.status = 403;
             return;
@@ -442,7 +458,7 @@ int main(int argc, char ** argv) {
     // Tool list proxy: the same path as the model list, for the built-in tools,
     // the tools of the MCP servers the page names and of the endpoint when it
     // is a llama.cpp server. It fails only when nothing lists any.
-    server.Post("/v1/tools", [&](const httplib::Request & req, httplib::Response & res) {
+    g_server->Post("/v1/tools", [&](const httplib::Request & req, httplib::Response & res) {
         if (!origin_allowed(origins, req)) {
             res.status = 403;
             return;
@@ -529,7 +545,7 @@ int main(int argc, char ** argv) {
 
     // s2s.js: the same client, standalone, for a page hosted elsewhere.
     if (s2s_js_gz_len > 0) {
-        server.Get("/s2s.js", [](const httplib::Request & req, httplib::Response & res) {
+        g_server->Get("/s2s.js", [](const httplib::Request & req, httplib::Response & res) {
             if (req.get_header_value("Accept-Encoding").find("gzip") == std::string::npos) {
                 res.status = 406;
                 res.set_content("gzip required", "text/plain");
@@ -544,14 +560,14 @@ int main(int argc, char ** argv) {
     // A plain GET on the realtime path means the upgrade never happened: a
     // reverse proxy that does not tunnel WebSocket answers this instead of
     // handing the socket over. Saying so beats a silent 404.
-    server.Get("/v1/realtime", [](const httplib::Request & req, httplib::Response & res) {
+    g_server->Get("/v1/realtime", [](const httplib::Request & req, httplib::Response & res) {
         s2s_log(S2S_LOG_WARN, "[HTTP] GET /v1/realtime without an upgrade, Connection: '%s', Upgrade: '%s'",
                 req.get_header_value("Connection").c_str(), req.get_header_value("Upgrade").c_str());
         res.status = 426;
         res.set_content("{\"error\":\"websocket upgrade required\"}", "application/json");
     });
 
-    server.WebSocket("/v1/realtime", [&](const httplib::Request & req, httplib::ws::WebSocket & ws) {
+    g_server->WebSocket("/v1/realtime", [&](const httplib::Request & req, httplib::ws::WebSocket & ws) {
         // The pool thread is this connection's reader until it closes.
         const int    id = ++g_connections;
         S2SLogThread named("Reader-" + std::to_string(id));
@@ -600,9 +616,8 @@ int main(int argc, char ** argv) {
     s2s_log(S2S_LOG_INFO, "[Server] s2s-server %s", S2S_VERSION);
     s2s_log(S2S_LOG_INFO, "[Server] Mode: %s, endpoint %s, %zu MCP servers", setup.defaults.mode.c_str(),
             setup.llm_fixed ? "set by the command line" : "named by the session", setup.defaults.mcp.size());
-    s2s_log(S2S_LOG_INFO, "[Server] Listening on http://%s:%d", host.c_str(), port);
 
-    if (!server.listen(host, port)) {
+    if (!g_server->listen(host, port)) {
         s2s_log(S2S_LOG_ERROR, "[Server] FATAL: cannot bind %s:%d", host.c_str(), port);
         return 1;
     }

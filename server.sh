@@ -13,5 +13,4 @@ set -eu
     --port 8088 \
     --models ./models \
     --voices ./voices \
-    --origin http://localhost:8088 \
-    --origin http://127.0.0.1:8088
+    --ssl
