@@ -95,6 +95,7 @@ struct tts_request {
 // synthesis in flight.
 typedef bool (*tts_chunk_cb)(const float * pcm, size_t n_samples, void * user);
 
+tts_bridge * tts_bridge_load2(const std::vector<std::string> & voices);
 tts_bridge * tts_bridge_load(const tts_bridge_params & params);
 void         tts_bridge_free(tts_bridge * b);
 

@@ -208,6 +208,19 @@ static const TtsVoiceEntry * tts_bridge_find_voice(const tts_bridge * b, const s
     return nullptr;
 }
 
+tts_bridge * tts_bridge_load2(const std::vector<std::string> & voices) {
+    if (voices.empty()) {
+        s2s_set_error("[TTS] No voices provided");
+        return nullptr;
+    }
+    tts_bridge * b = new tts_bridge();
+    b->labels = voices;
+    b->defaults.voice    = b->labels.front();
+    b->defaults.language = "auto";
+    return b;
+}
+
+
 tts_bridge * tts_bridge_load(const tts_bridge_params & params) {
     if (params.talker_path.empty() || params.codec_path.empty()) {
         s2s_set_error("[TTS] Talker or codec path is empty");

@@ -78,7 +78,18 @@ struct ConversationSetup {
     bool                     llm_fixed = false;
     bool                     mcp_fixed = false;
     std::vector<std::string> llm_hosts;
+
+    // Optional HTTP ASR/TTS backends. When non-empty, the local qwenasr.cpp
+    // and qwentts.cpp backends are skipped and the loop calls the remote
+    // OpenAI-compatible audio endpoints instead.
+    std::string asr_url;
+    std::string asr_api_key;
+    std::string asr_model;
+    std::string tts_url;
+    std::string tts_api_key;
+    std::string tts_model;
 };
+std::vector<std::string> conn_tts_voices(const ConversationSetup* setup);
 
 struct SendData {
     std::string data;

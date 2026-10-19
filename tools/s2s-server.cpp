@@ -98,6 +98,14 @@ static void print_usage(const char * prog) {
             "  --llm-model <name>     Model on that endpoint\n"
             "  --llm-key-file <path>  File holding its API key, read at startup\n"
             "  --llm-key <key>         API key for the LLM, read at startup\n"
+            "  --asr-url <url>        HTTP ASR endpoint, OpenAI-compatible /v1/audio/transcriptions\n"
+            "  --asr-key-file <path>  File holding the ASR API key, read at startup\n"
+            "  --asr-key <key>        API key for the ASR service\n"
+            "  --asr-model <name>     Model on the ASR endpoint\n"
+            "  --tts-url <url>        HTTP TTS endpoint, OpenAI-compatible /v1/audio/speech\n"
+            "  --tts-key-file <path>  File holding the TTS API key, read at startup\n"
+            "  --tts-key <key>        API key for the TTS service\n"
+            "  --tts-model <name>     Model on the TTS endpoint\n"
             "  --mcp <url>            MCP server the agentic mode uses, repeatable, Streamable HTTP\n"
             "  --mcp-key-file <path>  File holding the key of the --mcp named before it\n"
             "\n"
@@ -189,6 +197,30 @@ int main(int argc, char ** argv) {
         } else if (arg == "--llm-key" && has_value) {
             llm_defaults.api_key = argv[++i];
             setup.llm_fixed = true;
+        } else if (arg == "--asr-url" && has_value) {
+            setup.asr_url = argv[++i];
+        } else if (arg == "--asr-key-file" && has_value) {
+            std::ifstream in(std::filesystem::u8path(argv[++i]));
+            if (!std::getline(in, setup.asr_api_key) || setup.asr_api_key.empty()) {
+                s2s_log(S2S_LOG_ERROR, "[Server] FATAL: no ASR key in %s", argv[i]);
+                return 1;
+            }
+        } else if (arg == "--asr-key" && has_value) {
+            setup.asr_api_key = argv[++i];
+        } else if (arg == "--asr-model" && has_value) {
+            setup.asr_model = argv[++i];
+        } else if (arg == "--tts-model" && has_value) {
+            setup.tts_model = argv[++i];
+        } else if (arg == "--tts-url" && has_value) {
+            setup.tts_url = argv[++i];
+        } else if (arg == "--tts-key-file" && has_value) {
+            std::ifstream in(std::filesystem::u8path(argv[++i]));
+            if (!std::getline(in, setup.tts_api_key) || setup.tts_api_key.empty()) {
+                s2s_log(S2S_LOG_ERROR, "[Server] FATAL: no TTS key in %s", argv[i]);
+                return 1;
+            }
+        } else if (arg == "--tts-key" && has_value) {
+            setup.tts_api_key = argv[++i];
         } else if (arg == "--mcp" && has_value) {
             mcp_server_params server;
             server.url = argv[++i];

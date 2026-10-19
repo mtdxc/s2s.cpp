@@ -26,12 +26,14 @@
 
 #include "s2s-conversation.h"
 
+#include "http-client.h"
 #include "jarvis-fx.h"
 #include "llm-agent.h"
 #include "s2s-error.h"
 #include "s2s-session.h"
 #include "sentence-split.h"
 #include "timer.h"
+#include "yyjson.h"
 
 #include <algorithm>
 #include <atomic>
@@ -387,6 +389,466 @@ static void conn_error(Connection * conn, const char * message) {
     conn_send(conn, rt_event_error(message));
 }
 
+static std::string http_route(const std::string & base_url, const std::string & suffix) {
+    std::string host;
+    std::string path;
+    if (!http_split_url(base_url, host, path)) {
+        return suffix;
+    }
+    while (!path.empty() && path.back() == '/') {
+        path.pop_back();
+    }
+    if (path.empty() || path == "/") {
+        return "/v1" + suffix;
+    }
+    if (path.size() >= 3 && path.compare(path.size() - 3, 3, "/v1") == 0) {
+        return path + suffix;
+    }
+    return path + "/v1" + suffix;
+}
+
+static void wav_le16(std::string & out, size_t pos, uint16_t value) {
+    out[pos + 0] = (char) (value & 0xff);
+    out[pos + 1] = (char) ((value >> 8) & 0xff);
+}
+
+static void wav_le32(std::string & out, size_t pos, uint32_t value) {
+    out[pos + 0] = (char) (value & 0xff);
+    out[pos + 1] = (char) ((value >> 8) & 0xff);
+    out[pos + 2] = (char) ((value >> 16) & 0xff);
+    out[pos + 3] = (char) ((value >> 24) & 0xff);
+}
+
+static std::string wav_encode_pcm16(const std::vector<float> & samples, int sample_rate) {
+    (void) sample_rate;
+    const uint32_t n_samples = (uint32_t) samples.size();
+    const uint32_t data_size = n_samples * 2u;
+    std::string out(44 + data_size, '\0');
+    memcpy(out.data(), "RIFF", 4);
+    wav_le32(out, 4, 36u + data_size);
+    memcpy(out.data() + 8, "WAVE", 4);
+    memcpy(out.data() + 12, "fmt ", 4);
+    wav_le32(out, 16, 16u);
+    wav_le16(out, 20, 1u);
+    wav_le16(out, 22, 1u);
+    wav_le32(out, 24, (uint32_t) sample_rate);
+    wav_le32(out, 28, (uint32_t) sample_rate * 2u);
+    wav_le16(out, 32, 2u);
+    wav_le16(out, 34, 16u);
+    memcpy(out.data() + 36, "data", 4);
+    wav_le32(out, 40, data_size);
+
+    for (uint32_t i = 0; i < n_samples; ++i) {
+        float v = samples[i];
+        if (v < -1.0f) {
+            v = -1.0f;
+        } else if (v > 1.0f) {
+            v = 1.0f;
+        }
+        const int16_t s = (int16_t) lrintf(v * 32767.0f);
+        const uint16_t u = (uint16_t) s;
+        out[44 + i * 2 + 0] = (char) (u & 0xff);
+        out[44 + i * 2 + 1] = (char) ((u >> 8) & 0xff);
+    }
+    return out;
+}
+
+static uint16_t wav_u16le(const std::string & data, size_t pos) {
+    return (uint16_t) ((unsigned char) data[pos + 0] | ((unsigned char) data[pos + 1] << 8));
+}
+
+static uint32_t wav_u32le(const std::string & data, size_t pos) {
+    return (uint32_t) ((unsigned char) data[pos + 0] |
+                      ((unsigned char) data[pos + 1] << 8) |
+                      ((unsigned char) data[pos + 2] << 16) |
+                      ((unsigned char) data[pos + 3] << 24));
+}
+
+static std::vector<float> wav_decode_pcm16(const std::string & bytes) {
+    std::vector<float> out;
+    if (bytes.size() < 44 || memcmp(bytes.data(), "RIFF", 4) != 0 || memcmp(bytes.data() + 8, "WAVE", 4) != 0) {
+        return out;
+    }
+    size_t pos = 12;
+    uint16_t channels = 1;
+    uint32_t sample_rate = 0;
+    uint16_t bits_per_sample = 16;
+    size_t data_offset = 0;
+    size_t data_size = 0;
+    while (pos + 8 <= bytes.size()) {
+        const std::string tag(bytes.data() + pos, bytes.data() + pos + 4);
+        const uint32_t size = wav_u32le(bytes, pos + 4);
+        pos += 8;
+        if (tag == "fmt ") {
+            if (pos + 16 <= bytes.size()) {
+                const uint16_t format_tag = wav_u16le(bytes, pos + 0);
+                channels = wav_u16le(bytes, pos + 2);
+                sample_rate = wav_u32le(bytes, pos + 4);
+                bits_per_sample = wav_u16le(bytes, pos + 14);
+                if (format_tag != 1) {
+                    return out;
+                }
+            }
+        } else if (tag == "data") {
+            data_offset = pos;
+            data_size = size;
+            break;
+        }
+        pos += size + (size & 1u);
+    }
+    if (data_offset == 0 || data_size == 0 || bits_per_sample != 16) {
+        return out;
+    }
+    const size_t n_frames = data_size / (size_t) (channels * 2);
+    out.reserve(n_frames);
+    for (size_t i = 0; i < n_frames; ++i) {
+        int32_t sum = 0;
+        for (uint16_t ch = 0; ch < channels; ++ch) {
+            const size_t off = data_offset + (i * channels + ch) * 2;
+            if (off + 1 >= bytes.size()) {
+                return out;
+            }
+            const int16_t sample = (int16_t) ((uint16_t) ((unsigned char) bytes[off + 0]) |
+                                              ((uint16_t) (unsigned char) bytes[off + 1] << 8));
+            sum += sample;
+        }
+        const float v = (float) sum / (float) (channels * 32768);
+        out.push_back(v);
+    }
+    (void) sample_rate;
+    return out;
+}
+
+static std::vector<float> wav_decode_any(const std::string & bytes) {
+    if (bytes.size() >= 12 && memcmp(bytes.data(), "RIFF", 4) == 0) {
+        return wav_decode_pcm16(bytes);
+    }
+    if (bytes.size() % 2 != 0) {
+        return {};
+    }
+    std::vector<float> out(bytes.size() / 2);
+    for (size_t i = 0; i < out.size(); ++i) {
+        const int16_t sample = (int16_t) ((uint16_t) ((unsigned char) bytes[i * 2 + 0]) |
+                                          ((uint16_t) (unsigned char) bytes[i * 2 + 1] << 8));
+        out[i] = (float) sample / 32768.0f;
+    }
+    return out;
+}
+
+static std::string http_error_body(const std::string & body) {
+    yyjson_doc * doc = yyjson_read(body.c_str(), body.size(), 0);
+    if (!doc) {
+        return body;
+    }
+    yyjson_val * error = yyjson_obj_get(yyjson_doc_get_root(doc), "error");
+    yyjson_val * message = nullptr;
+    if (error && yyjson_is_obj(error)) {
+        message = yyjson_obj_get(error, "message");
+    }
+    if (!message) {
+        message = yyjson_obj_get(yyjson_doc_get_root(doc), "text");
+    }
+    std::string out;
+    if (message && yyjson_is_str(message)) {
+        out.assign(yyjson_get_str(message), yyjson_get_len(message));
+    }
+    yyjson_doc_free(doc);
+    return out.empty() ? body : out;
+}
+
+static bool conn_remote_asr(Connection * conn, const std::vector<float> & pcm, std::string & transcript) {
+    if (conn->setup->asr_url.empty()) {
+        return false;
+    }
+    std::string host;
+    std::string path;
+    if (!http_split_url(conn->setup->asr_url, host, path)) {
+        conn_error(conn, "[ASR] Remote ASR URL has no scheme");
+        return false;
+    }
+    std::unique_ptr<httplib::Client> http = http_open(host, "[ASR]");
+    if (!http) {
+        return false;
+    }
+    const std::string endpoint = http_route(conn->setup->asr_url, "/audio/transcriptions");
+    httplib::UploadFormDataItems items;
+    httplib::UploadFormData file;
+    file.name = "file";
+    file.filename = "audio.wav";
+    file.content_type = "audio/wav";
+    file.content = wav_encode_pcm16(pcm, S2S_MODEL_RATE);
+    items.push_back(file);
+    if (!conn->setup->asr_model.empty()) {
+        httplib::UploadFormData model;
+        model.name = "model";
+        model.content = conn->setup->asr_model;
+        items.push_back(model);
+    }
+    if (!conn->client.tts.language.empty() && conn->client.tts.language != "auto") {
+        httplib::UploadFormData language;
+        language.name = "language";
+        language.content = conn->client.tts.language;
+        items.push_back(language);
+    }
+
+    httplib::Headers headers = httplib::Headers();
+    if (!conn->setup->asr_api_key.empty()) {
+        headers.emplace("Authorization", "Bearer " + conn->setup->asr_api_key);
+        headers.emplace("api-key", conn->setup->asr_api_key);
+    }
+    const httplib::Result result = http->Post(endpoint, headers, items);
+    if (!result) {
+        const std::string err = std::string("[ASR] ") + http_error(result);
+        conn_error(conn, err.c_str());
+        return false;
+    }
+    if (result->status != 200) {
+        const std::string err = "[ASR] " + std::to_string(result->status) + " " + http_error_body(result->body);
+        conn_error(conn, err.c_str());
+        return false;
+    }
+
+    yyjson_doc * doc = yyjson_read(result->body.c_str(), result->body.size(), 0);
+    if (doc) {
+        yyjson_val * text = yyjson_obj_get(yyjson_doc_get_root(doc), "text");
+        if (text && yyjson_is_str(text)) {
+            transcript.assign(yyjson_get_str(text), yyjson_get_len(text));
+        }
+        yyjson_doc_free(doc);
+    }
+    if (transcript.empty()) {
+        transcript = result->body;
+    }
+    while (!transcript.empty() && (transcript.front() == '\n' || transcript.front() == '\r' || transcript.front() == ' ')) {
+        transcript.erase(transcript.begin());
+    }
+    while (!transcript.empty() && (transcript.back() == '\n' || transcript.back() == '\r' || transcript.back() == ' ')) {
+        transcript.pop_back();
+    }
+    return !transcript.empty();
+}
+
+static bool conn_remote_tts(Connection * conn, const SentenceUnit & unit, const tts_request & tts,
+                            std::vector<float> & pcm) {
+    if (conn->setup->tts_url.empty()) {
+        return false;
+    }
+    std::string host;
+    std::string path;
+    if (!http_split_url(conn->setup->tts_url, host, path)) {
+        conn_error(conn, "[TTS] Remote TTS URL has no scheme");
+        return false;
+    }
+    std::unique_ptr<httplib::Client> http = http_open(host, "[TTS]");
+    if (!http) {
+        return false;
+    }
+
+    std::string body;
+    {
+        yyjson_mut_doc * doc = yyjson_mut_doc_new(nullptr);
+        yyjson_mut_val * root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+        yyjson_mut_obj_add_str(doc, root, "input", unit.text.c_str());
+        if (!tts.voice.empty()) {
+            yyjson_mut_obj_add_str(doc, root, "voice", tts.voice.c_str());
+        }
+        if (!tts.language.empty() && tts.language != "auto") {
+            yyjson_mut_obj_add_str(doc, root, "language", tts.language.c_str());
+        }
+        if (conn->setup->tts_model.empty()) {
+            yyjson_mut_obj_add_str(doc, root, "model", conn->setup->tts_model.c_str());
+        }
+        yyjson_mut_obj_add_real(doc, root, "speed", 1.0);
+        char * json = yyjson_mut_write(doc, 0, nullptr);
+        body = json ? json : "{}";
+        free(json);
+        yyjson_mut_doc_free(doc);
+    }
+
+    httplib::Headers headers;
+    if (!conn->setup->tts_api_key.empty()) {
+        headers.emplace("Authorization", "Bearer " + conn->setup->tts_api_key);
+        headers.emplace("api-key", conn->setup->tts_api_key);
+    }
+    const std::string endpoint = http_route(conn->setup->tts_url, "/audio/speech");
+
+    std::string streamed;
+    auto receiver = [&](const char * data, size_t len) -> bool {
+        if (len == 0) {
+            return true;
+        }
+        streamed.append(data, len);
+        return true;
+    };
+
+    const httplib::Result result = http->Post(endpoint, headers, body, "application/json", receiver);
+    if (!result) {
+        const std::string err = std::string("[TTS] ") + http_error(result);
+        conn_error(conn, err.c_str());
+        return false;
+    }
+    if (result->status != 200) {
+        const std::string err = "[TTS] " + std::to_string(result->status) + " " + http_error_body(result->body);
+        conn_error(conn, err.c_str());
+        return false;
+    }
+
+    pcm = wav_decode_any(streamed);
+    if (pcm.empty()) {
+        conn_error(conn, "[TTS] remote endpoint returned no decodable audio");
+        return false;
+    }
+    return true;
+}
+
+static bool conn_remote_tts_stream(Connection * conn, const SentenceUnit & unit, const tts_request & tts,
+                                  tts_chunk_cb cb, void * user, const std::atomic<bool> * cancel) {
+    if (conn->setup->tts_url.empty()) {
+        return false;
+    }
+    std::string host;
+    std::string path;
+    if (!http_split_url(conn->setup->tts_url, host, path)) {
+        conn_error(conn, "[TTS] Remote TTS URL has no scheme");
+        return false;
+    }
+    std::unique_ptr<httplib::Client> http = http_open(host, "[TTS]");
+    if (!http) {
+        return false;
+    }
+
+    std::string body;
+    {
+        yyjson_mut_doc * doc = yyjson_mut_doc_new(nullptr);
+        yyjson_mut_val * root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+        yyjson_mut_obj_add_str(doc, root, "input", unit.text.c_str());
+        if (!tts.voice.empty()) {
+            yyjson_mut_obj_add_str(doc, root, "voice", tts.voice.c_str());
+        }
+        if (!tts.language.empty() && tts.language != "auto") {
+            yyjson_mut_obj_add_str(doc, root, "language", tts.language.c_str());
+        }
+        if (!conn->setup->tts_model.empty()) {
+            yyjson_mut_obj_add_str(doc, root, "model", conn->setup->tts_model.c_str());
+        }
+        yyjson_mut_obj_add_str(doc, root, "response_format", "wav");
+        yyjson_mut_obj_add_real(doc, root, "speed", 1.0);
+        char * json = yyjson_mut_write(doc, 0, nullptr);
+        body = json ? json : "{}";
+        free(json);
+        yyjson_mut_doc_free(doc);
+    }
+
+    httplib::Headers headers;
+    if (!conn->setup->tts_api_key.empty()) {
+        headers.emplace("Authorization", "Bearer " + conn->setup->tts_api_key);
+        headers.emplace("api-key", conn->setup->tts_api_key);
+    }
+    const std::string endpoint = http_route(conn->setup->tts_url, "/audio/speech");
+
+    std::string pending;
+    bool        first = true;
+    auto receiver = [&](const char * data, size_t len) -> bool {
+        if (!data || len == 0) {
+            return !(cancel && cancel->load());
+        }
+        if (cancel && cancel->load()) {
+            return false;
+        }
+        pending.append(data, len);
+
+        std::vector<float> pcm = wav_decode_any(pending);
+        if (!pcm.empty()) {
+            if (first) {
+                conn_send(conn, rt_event_spoken(unit.text, unit.end));
+                first = false;
+            }
+            if (!cb || !cb(pcm.data(), pcm.size(), user)) {
+                return false;
+            }
+            pending.clear();
+        }
+        return true;
+    };
+
+    const httplib::Result result = http->Post(endpoint, headers, body, "application/json", receiver);
+    if (!result) {
+        const std::string err = std::string("[TTS] ") + http_error(result);
+        conn_error(conn, err.c_str());
+        return false;
+    }
+    if (result->status != 200) {
+        const std::string err = "[TTS] " + std::to_string(result->status) + " " + http_error_body(result->body);
+        conn_error(conn, err.c_str());
+        return false;
+    }
+
+    if (!pending.empty()) {
+        std::vector<float> leftover = wav_decode_any(pending);
+        if (!leftover.empty()) {
+            if (first) {
+                conn_send(conn, rt_event_spoken(unit.text, unit.end));
+                first = false;
+            }
+            if (!cb || !cb(leftover.data(), leftover.size(), user)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+std::vector<std::string> conn_tts_voices(const ConversationSetup* setup) {
+    std::vector<std::string> ret;
+    if (setup->tts_url.empty()) {
+        return ret;
+    }
+    std::string host;
+    std::string path;
+    if (!http_split_url(setup->tts_url, host, path)) {
+        s2s_log(S2S_LOG_ERROR, "[TTS] Remote TTS URL has no scheme");
+        return ret;
+    }
+    std::unique_ptr<httplib::Client> http = http_open(host, "[TTS]");
+    if (!http) {
+        return ret;
+    }
+    httplib::Headers headers;
+    if (!setup->tts_api_key.empty()) {
+        headers.emplace("Authorization", "Bearer " + setup->tts_api_key);
+        headers.emplace("api-key", setup->tts_api_key);
+    }
+    const std::string endpoint = http_route(setup->tts_url, "/audio/voices?model=" + setup->tts_model);
+    const httplib::Result result = http->Get(endpoint, headers);
+    if (!result) {
+        s2s_log(S2S_LOG_ERROR, "[TTS] Failed to fetch voices: %s", http_error(result).c_str());
+        return ret;
+    }
+    if (result->status != 200) {
+        s2s_log(S2S_LOG_ERROR, "[TTS] Failed to fetch voices: %d %s", result->status, http_error_body(result->body).c_str());
+        return ret;
+    }
+    // Parse the JSON response to extract the list of voices
+    yyjson_doc * doc = yyjson_read(result->body.c_str(), result->body.size(), 0);
+    if (doc) {
+        yyjson_val * voices = yyjson_obj_get(yyjson_doc_get_root(doc), "voices");
+        if (voices && yyjson_is_arr(voices)) {
+            yyjson_val * val;
+            yyjson_arr_iter iter;
+            yyjson_arr_iter_init(voices, &iter);
+            while ((val = yyjson_arr_iter_next(&iter))) {
+                if (yyjson_is_str(val)) {
+                    ret.push_back(std::string(yyjson_get_str(val), yyjson_get_len(val)));
+                }
+            }
+        }
+        yyjson_doc_free(doc);
+    }
+    return ret;
+}
+
 // Runs the canceller over every complete hop and hands back in pcm what is
 // clean so far. The canceller is one hop late and its hops of 256 samples do
 // not line up with the client frames, so the cleaned stream trails the raw
@@ -566,29 +1028,54 @@ static bool conn_speak(Connection * conn, const SentenceUnit & unit, const tts_r
     speak_tap.unit   = &unit;
     speak_tap.jarvis = tts.effect == "jarvis";
     s2s_log(S2S_LOG_INFO, "[TTS] Speaking unit: %s", unit.text.c_str());
-    const bool spoke = tts_bridge_speak(
-        conn->setup->models.tts, unit.text, tts,
-        [](const float * pcm, size_t n_samples, void * user) {
-            SpeakTap * self = (SpeakTap *) user;
-            if (self->samples == 0 && n_samples > 0) {
-                conn_send(self->conn, rt_event_spoken(self->unit->text, self->unit->end));
-            }
-            self->samples += n_samples;
-            if (self->jarvis) {
-                std::vector<float> & out = self->conn->fx_pcm;
-                out.assign(pcm, pcm + n_samples);
-                jarvis_fx_process(self->conn->fx, out.data(), n_samples);
-                pcm = out.data();
-            }
-            conn_send(self->conn, pcm, n_samples);
-            // conn_send(self->conn, rt_event_audio(pcm, n_samples));
-            return !self->conn->cancel.load();
-        },
-        &speak_tap, &conn->cancel);
+    bool spoke = false;
+    if (!conn->setup->tts_url.empty()) {
+        spoke = conn_remote_tts_stream(
+            conn, unit, tts,
+            [](const float * pcm, size_t n_samples, void * user) {
+                SpeakTap * self = (SpeakTap *) user;
+                if (self->samples == 0 && n_samples > 0) {
+                    // rt_event_spoken is emitted by conn_remote_tts_stream when the first chunk arrives.
+                }
+                self->samples += n_samples;
+                if (self->jarvis) {
+                    std::vector<float> & out = self->conn->fx_pcm;
+                    out.assign(pcm, pcm + n_samples);
+                    jarvis_fx_process(self->conn->fx, out.data(), n_samples);
+                    pcm = out.data();
+                }
+                conn_send(self->conn, pcm, (int) n_samples);
+                return !self->conn->cancel.load();
+            },
+            &speak_tap, &conn->cancel);
+    } else {
+        spoke = tts_bridge_speak(
+            conn->setup->models.tts, unit.text, tts,
+            [](const float * pcm, size_t n_samples, void * user) {
+                SpeakTap * self = (SpeakTap *) user;
+                if (self->samples == 0 && n_samples > 0) {
+                    conn_send(self->conn, rt_event_spoken(self->unit->text, self->unit->end));
+                }
+                self->samples += n_samples;
+                if (self->jarvis) {
+                    std::vector<float> & out = self->conn->fx_pcm;
+                    out.assign(pcm, pcm + n_samples);
+                    jarvis_fx_process(self->conn->fx, out.data(), n_samples);
+                    pcm = out.data();
+                }
+                conn_send(self->conn, pcm, n_samples);
+                return !self->conn->cancel.load();
+            },
+            &speak_tap, &conn->cancel);
+    }
 
     if (!spoke && !conn->cancel.load()) {
-        s2s_log(S2S_LOG_WARN, "[TTS] %s", tts_bridge_last_error());
-        conn_send(conn, rt_event_error(tts_bridge_last_error()));
+        if (!conn->setup->tts_url.empty()) {
+            conn_send(conn, rt_event_error("[TTS] remote synthesis failed"));
+        } else {
+            s2s_log(S2S_LOG_WARN, "[TTS] %s", tts_bridge_last_error());
+            conn_send(conn, rt_event_error(tts_bridge_last_error()));
+        }
     }
 
     return spoke;
@@ -767,21 +1254,28 @@ static void conn_recognize(Connection * conn, const TurnAudio & turn) {
 
     Timer t_asr;
 
-    qa_transcribe_params asr_params = qa_transcribe_default_params();
-    char *               text       = nullptr;
-    qa_status            status;
-    {
-        std::lock_guard<std::mutex> asr_lock(conn->setup->models.asr_mutex);
-        status = qa_transcribe(conn->setup->models.asr, pcm.data(), pcm.size(), S2S_MODEL_RATE, &asr_params, &text);
+    std::string transcript;
+    if (!conn->setup->asr_url.empty()) {
+        if (!conn_remote_asr(conn, pcm, transcript)) {
+            conn_release(conn, turn.turn_id, turn.revision);
+            return;
+        }
+    } else {
+        qa_transcribe_params asr_params = qa_transcribe_default_params();
+        char *               text       = nullptr;
+        qa_status            status;
+        {
+            std::lock_guard<std::mutex> asr_lock(conn->setup->models.asr_mutex);
+            status = qa_transcribe(conn->setup->models.asr, pcm.data(), pcm.size(), S2S_MODEL_RATE, &asr_params, &text);
+        }
+        if (status != QA_STATUS_OK) {
+            conn_error(conn, qa_last_error());
+            conn_release(conn, turn.turn_id, turn.revision);
+            return;
+        }
+        transcript = text;
+        qa_free_text(text);
     }
-    if (status != QA_STATUS_OK) {
-        conn_error(conn, qa_last_error());
-        conn_release(conn, turn.turn_id, turn.revision);
-        return;
-    }
-
-    const std::string transcript = text;
-    qa_free_text(text);
 
     s2s_log(S2S_LOG_INFO, "[Perf] Recognize %.1f ms (%.2fs of audio)", t_asr.ms(),
             (double) pcm.size() / S2S_MODEL_RATE);

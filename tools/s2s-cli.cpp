@@ -462,6 +462,15 @@ static void print_usage(const char * prog) {
             "  --llm-timeout <s>           Longest the endpoint may stay silent, a prefill included\n"
             "                              (default: 10)\n"
             "  --llm-key-file <path>       File holding its API key, read at startup\n"
+            "  --llm-key <key>             API key for the LLM\n"
+            "  --asr-url <url>             HTTP ASR endpoint, OpenAI-compatible /v1/audio/transcriptions\n"
+            "  --asr-key-file <path>       File holding the ASR API key, read at startup\n"
+            "  --asr-key <key>             API key for the ASR service\n"
+            "  --asr-model <name>          Model on the ASR endpoint\n"
+            "  --tts-url <url>             HTTP TTS endpoint, OpenAI-compatible /v1/audio/speech\n"
+            "  --tts-key-file <path>       File holding the TTS API key, read at startup\n"
+            "  --tts-key <key>             API key for the TTS service\n"
+            "  --tts-model <name>          Model on the TTS endpoint\n"
             "  --reasoning-effort <e>      How long a reasoning model thinks before it answers:\n"
             "                              none, or a level of its chat template (default: none)\n"
             "\n"
@@ -637,9 +646,10 @@ int main(int argc, char ** argv) {
     int  mic     = -1;
     int  speaker = -1;
 
-    tts_engine  engine;
-    std::string compute_device;
-    Cli         cli;
+    tts_engine        engine;
+    std::string       compute_device;
+    ConversationSetup setup;
+    Cli               cli;
 
     if (argc < 2) {
         print_usage(argv[0]);
@@ -667,9 +677,29 @@ int main(int argc, char ** argv) {
         } else if (arg == "--llm-timeout" && has_value) {
             llm_timeout = atoi(argv[++i]);
         } else if (arg == "--llm-key" && has_value) {
-            llm_key = argv[++i];     
+            llm_key = argv[++i];
         } else if (arg == "--llm-key-file" && has_value) {
             if (!read_key(argv[++i], llm_key)) {
+                return 1;
+            }
+        } else if (arg == "--asr-url" && has_value) {
+            setup.asr_url = argv[++i];
+        } else if (arg == "--asr-key" && has_value) {
+            setup.asr_api_key = argv[++i];
+        } else if (arg == "--asr-key-file" && has_value) {
+            if (!read_key(argv[++i], setup.asr_api_key)) {
+                return 1;
+            }
+        } else if (arg == "--asr-model" && has_value) {
+            setup.asr_model = argv[++i];
+        } else if (arg == "--tts-model" && has_value) {
+            setup.tts_model = argv[++i];
+        } else if (arg == "--tts-url" && has_value) {
+            setup.tts_url = argv[++i];
+        } else if (arg == "--tts-key" && has_value) {
+            setup.tts_api_key = argv[++i];
+        } else if (arg == "--tts-key-file" && has_value) {
+            if (!read_key(argv[++i], setup.tts_api_key)) {
                 return 1;
             }
         } else if (arg == "--reasoning-effort" && has_value) {
@@ -762,8 +792,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    ConversationSetup setup;
-    ModelFiles        files;
+    ModelFiles files;
     if (!models_load(models_dir, voices_dir, compute_device, engine, files, setup)) {
         ma_context_uninit(&context);
         return 1;
